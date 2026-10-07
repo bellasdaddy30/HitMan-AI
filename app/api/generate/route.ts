@@ -25,11 +25,11 @@ export async function POST(req: NextRequest) {
         tags,
         duration,
         seed,
-        infer_step: 27,
+        number_of_steps: 27,
       },
-    }) as { data: { audio?: { url?: string }; audio_url?: string } };
+    }) as { data: { audio?: { url?: string } } };
 
-    const url = result.data?.audio?.url ?? result.data?.audio_url;
+    const url = result.data?.audio?.url;
     if (!url) {
       return Response.json({ error: 'No audio returned from generation.' }, { status: 502 });
     }
