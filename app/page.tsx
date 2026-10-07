@@ -1,5 +1,4 @@
 import Link from 'next/link';
-import Image from 'next/image';
 
 const BARS = [0.4, 0.7, 1, 0.85, 0.6, 0.9, 0.5, 0.75, 1, 0.65, 0.8, 0.45, 0.95, 0.7, 0.55, 0.85, 1, 0.6, 0.75, 0.4];
 
@@ -57,14 +56,8 @@ export default function Home() {
         borderRadius: '16px', overflow: 'hidden',
         boxShadow: '0 0 60px rgba(230,57,70,0.22)',
       }}>
-        <Image
-          src="/hitman.jpeg"
-          alt="HitMan AI"
-          width={2816}
-          height={1536}
-          priority
-          style={{ width: '100%', height: 'auto', display: 'block' }}
-        />
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src="/hitman.jpeg" alt="HitMan AI" style={{ width: '100%', height: 'auto', display: 'block' }} />
       </div>
 
       {/* Title */}
