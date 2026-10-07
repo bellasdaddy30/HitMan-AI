@@ -46,7 +46,11 @@ export default function Studio() {
       });
       const data = await res.json();
       if (!res.ok) { setError(data.error || 'Generation failed.'); return; }
-      const version: Version = { id: nextId.current++, url: data.url, seed, genre, bpm, key, createdAt: new Date() };
+      // audio comes back as base64; turn it into an object URL for playback/download
+      const audioUrl = data.audio_b64
+        ? `data:audio/wav;base64,${data.audio_b64}`
+        : data.url;
+      const version: Version = { id: nextId.current++, url: audioUrl, seed, genre, bpm, key, createdAt: new Date() };
       setVersions(v => [version, ...v]);
       playVersion(version);
     } catch {

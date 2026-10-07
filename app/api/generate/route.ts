@@ -1,9 +1,6 @@
-import { fal } from '@fal-ai/client';
 import { NextRequest } from 'next/server';
 
 export const maxDuration = 120;
-
-fal.config({ credentials: process.env.FAL_KEY });
 
 export async function POST(req: NextRequest) {
   const { lyrics, genre, mood, bpm, key, duration, seed } = await req.json();
@@ -12,34 +9,36 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: 'Lyrics are required.' }, { status: 400 });
   }
 
-  if (!process.env.FAL_KEY) {
-    return Response.json({ error: 'FAL_KEY is not configured on the server.' }, { status: 500 });
+  const apiUrl = process.env.MUSIC_API_URL;
+  if (!apiUrl) {
+    return Response.json({ error: 'Music generation is offline. Start the Colab notebook and set MUSIC_API_URL.' }, { status: 503 });
   }
 
   const tags = `${genre.toLowerCase()}, ${mood.toLowerCase()}, ${bpm} bpm, key of ${key}`;
 
   try {
-    const result = await fal.subscribe('fal-ai/ace-step', {
-      input: {
-        lyrics,
-        tags,
-        duration,
-        seed,
-        number_of_steps: 27,
-      },
-    }) as { data: { audio?: { url?: string } } };
+    const res = await fetch(`${apiUrl}/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lyrics, tags, duration, seed }),
+      signal: AbortSignal.timeout(110_000),
+    });
 
-    const url = result.data?.audio?.url;
-    if (!url) {
-      return Response.json({ error: 'No audio returned from generation.' }, { status: 502 });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({})) as { error?: string };
+      return Response.json({ error: err.error || 'Generation failed.' }, { status: 502 });
     }
 
-    return Response.json({ url, seed });
+    const data = await res.json() as { audio_b64?: string; seed?: number };
+    if (!data.audio_b64) {
+      return Response.json({ error: 'No audio returned.' }, { status: 502 });
+    }
+
+    return Response.json({ audio_b64: data.audio_b64, seed: data.seed ?? seed });
   } catch (err: unknown) {
-    const e = err as { status?: number; message?: string };
-    console.error('[generate]', e?.status, e?.message);
-    if (e?.status === 401) return Response.json({ error: 'Invalid fal.ai API key.' }, { status: 502 });
-    if (e?.status === 429) return Response.json({ error: 'Rate limit hit. Try again in a moment.' }, { status: 429 });
-    return Response.json({ error: 'Generation failed. Try again.' }, { status: 502 });
+    const e = err as { name?: string; message?: string };
+    console.error('[generate]', e?.message);
+    if (e?.name === 'TimeoutError') return Response.json({ error: 'Generation timed out. Try a shorter duration.' }, { status: 504 });
+    return Response.json({ error: 'Could not reach the music server. Is the Colab notebook running?' }, { status: 502 });
   }
 }
