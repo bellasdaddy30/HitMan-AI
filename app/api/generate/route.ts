@@ -19,7 +19,10 @@ export async function POST(req: NextRequest) {
   try {
     const res = await fetch(`${apiUrl}/generate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'ngrok-skip-browser-warning': 'true',
+      },
       body: JSON.stringify({ lyrics, tags, duration, seed }),
       signal: AbortSignal.timeout(110_000),
     });
