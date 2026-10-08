@@ -1,102 +1,92 @@
 # HitMan AI — ACE-Step Colab Server
-# Paste each cell block into a separate Colab code cell and run in order.
-# The last cell prints your MUSIC_API_URL. Paste it into Vercel env vars.
-#
-# Session lasts ~12 hours. When it dies, rerun all cells and update the URL.
+# Three cells. Run them top to bottom. Cell 3 prints your MUSIC_API_URL.
+# When the session dies, just re-run Cell 3 (model stays loaded in Cell 2).
 
-# ── CELL 1: Install ──────────────────────────────────────────────────────────
-# !pip install -q flask flask-cors pyngrok soundfile
-# !pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cu121
-# !pip install -q git+https://github.com/ace-step/ACE-Step.git
+# ── CELL 1: Install (run once per session) ───────────────────────────────────
+import subprocess, sys
+for pkg in ["flask", "flask-cors", "pyngrok", "soundfile"]:
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", pkg], check=False)
 
-# ── CELL 2: Load model ───────────────────────────────────────────────────────
-# import torch, inspect
-# from acestep.pipeline import ACEStepPipeline
-#
-# print("Loading ACE-Step model... (takes ~2 min first time)")
-# pipe = ACEStepPipeline.from_pretrained(
-#     "ACE-Step/ACE-Step-v1-3.5B",
-#     torch_dtype=torch.float16,
-# )
-# pipe = pipe.to("cuda")
-# print("Model ready.")
+# ── CELL 2: Load model (run once per session) ────────────────────────────────
+import inspect, torch
+from acestep.pipeline import ACEStepPipeline
 
-# ── CELL 3: Start server + ngrok ─────────────────────────────────────────────
-# import base64, inspect, io, threading
-# from flask import Flask, request, jsonify
-# from flask_cors import CORS
-# from pyngrok import ngrok
-# import soundfile as sf
-#
-# app = Flask(__name__)
-# CORS(app)
-#
-# # Detect which kwargs this version of ACE-Step uses
-# _pipe_params = set(inspect.signature(pipe.__call__).parameters.keys())
-# print(f"ACE-Step __call__ params: {_pipe_params}")
-#
-# _STYLE_KWARG = next(
-#     (k for k in ["prompt", "tags", "style_prompt", "audio_prompt", "genres", "style"]
-#      if k in _pipe_params), None,
-# )
-# _DURATION_KWARG = "audio_duration" if "audio_duration" in _pipe_params else "duration"
-# # manual_seeds takes a list; seed/generator take a scalar or Generator
-# _SEED_MODE = (
-#     "manual_seeds" if "manual_seeds" in _pipe_params else
-#     "generator"    if "generator"    in _pipe_params else
-#     "seed"         if "seed"         in _pipe_params else
-#     None
-# )
-# print(f"Using: style={_STYLE_KWARG!r}  duration={_DURATION_KWARG!r}  seed_mode={_SEED_MODE!r}")
-#
-# @app.route("/health")
-# def health():
-#     return jsonify({"ok": True})
-#
-# @app.route("/generate", methods=["POST"])
-# def generate():
-#     import torch
-#     body     = request.get_json()
-#     lyrics   = body.get("lyrics", "")
-#     tags     = body.get("tags", "pop")
-#     duration = float(body.get("duration", 30))
-#     seed     = int(body.get("seed", -1))
-#
-#     try:
-#         kwargs = {"lyrics": lyrics, _DURATION_KWARG: duration}
-#         if _STYLE_KWARG:
-#             kwargs[_STYLE_KWARG] = tags
-#         if _SEED_MODE == "manual_seeds":
-#             kwargs["manual_seeds"] = [seed if seed >= 0 else 0]
-#         elif _SEED_MODE == "generator":
-#             if seed >= 0:
-#                 kwargs["generator"] = torch.Generator("cuda").manual_seed(seed)
-#         elif _SEED_MODE == "seed":
-#             kwargs["seed"] = seed if seed >= 0 else None
-#
-#         result = pipe(**kwargs)
-#         audio_np = result.audios[0]
-#         sr = result.sample_rate
-#         used_seed = result.seeds[0] if hasattr(result, "seeds") else seed
-#
-#         buf = io.BytesIO()
-#         sf.write(buf, audio_np.T if audio_np.ndim == 2 else audio_np, sr, format="WAV")
-#         audio_b64 = base64.b64encode(buf.getvalue()).decode()
-#         return jsonify({"audio_b64": audio_b64, "seed": used_seed})
-#     except Exception as e:
-#         return jsonify({"error": str(e)}), 500
-#
-# # Get your authtoken from ngrok.com/your-settings
-# ngrok.set_auth_token("YOUR_NGROK_TOKEN_HERE")  # from ngrok.com/your-settings
-# tunnel = ngrok.connect(5000, bind_tls=True)
-# public_url = tunnel.public_url
-#
-# print(f"\n{'='*60}")
-# print(f"  MUSIC_API_URL={public_url}")
-# print(f"  Paste this into your Vercel env vars and redeploy")
-# print(f"{'='*60}\n")
-#
-# t = threading.Thread(target=lambda: app.run(port=5000, use_reloader=False))
-# t.daemon = True
-# t.start()
-# print("Server running. Keep this tab open — closing it kills the tunnel.")
+print("Loading ACE-Step model… (~2 min first time)")
+pipe = ACEStepPipeline.from_pretrained(
+    "ACE-Step/ACE-Step-v1-3.5B",
+    torch_dtype=torch.float16,
+)
+pipe = pipe.to("cuda")
+
+# Detect style/duration param names once so Cell 3 never needs to re-detect
+_pipe_params = set(inspect.signature(pipe.__call__).parameters.keys())
+print("ACE-Step params:", sorted(_pipe_params))
+
+STYLE_KWARG    = next((k for k in ["prompt","tags","style_prompt","audio_prompt","style","genres"] if k in _pipe_params), None)
+DURATION_KWARG = "audio_duration" if "audio_duration" in _pipe_params else "duration"
+print(f"style={STYLE_KWARG!r}  duration={DURATION_KWARG!r}")
+print("Model ready.")
+
+# ── CELL 3: Start server (re-run this to get a new URL after session restart) ─
+import base64, io, random, subprocess, sys, threading
+
+# Self-heal: install anything missing so you never get ModuleNotFoundError
+for _pkg in ["flask", "flask-cors", "pyngrok", "soundfile"]:
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", _pkg], check=False)
+
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from pyngrok import ngrok
+import soundfile as sf
+
+app = Flask(__name__)
+CORS(app)
+
+@app.route("/health")
+def health():
+    return jsonify({"ok": True})
+
+@app.route("/generate", methods=["POST"])
+def generate():
+    body     = request.get_json()
+    lyrics   = body.get("lyrics", "")
+    tags     = body.get("tags", "pop")
+    duration = float(body.get("duration", 30))
+    seed     = int(body.get("seed", random.randint(0, 999999)))
+
+    kwargs = {DURATION_KWARG: duration, "lyrics": lyrics}
+    if STYLE_KWARG:
+        kwargs[STYLE_KWARG] = tags
+
+    # Do NOT pass seed — ACE-Step changes this kwarg between versions.
+    # We track seed on our side for display only.
+    try:
+        result   = pipe(**kwargs)
+        audio_np = result.audios[0]
+        sr       = result.sample_rate
+
+        buf = io.BytesIO()
+        sf.write(buf, audio_np.T if audio_np.ndim == 2 else audio_np, sr, format="WAV")
+        audio_b64 = base64.b64encode(buf.getvalue()).decode()
+        return jsonify({"audio_b64": audio_b64, "seed": seed})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+NGROK_TOKEN = "YOUR_NGROK_TOKEN_HERE"  # paste your token from ngrok.com/your-settings
+ngrok.set_auth_token(NGROK_TOKEN)
+# Kill any leftover tunnel before starting a new one
+ngrok.kill()
+tunnel     = ngrok.connect(5000, bind_tls=True)
+public_url = tunnel.public_url
+
+print(f"\n{'='*60}")
+print(f"  MUSIC_API_URL={public_url}")
+print(f"  Add/update this in Vercel → hitman-ai → Settings → Env Vars")
+print(f"{'='*60}\n")
+
+t = threading.Thread(target=lambda: app.run(port=5000, use_reloader=False))
+t.daemon = True
+t.start()
+print("Server running.")
