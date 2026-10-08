@@ -10,7 +10,7 @@
 # !pip install -q git+https://github.com/ace-step/ACE-Step.git
 
 # ── CELL 2: Load model ───────────────────────────────────────────────────────
-# import torch
+# import torch, inspect
 # from acestep.pipeline import ACEStepPipeline
 #
 # print("Loading ACE-Step model... (takes ~2 min first time)")
@@ -31,16 +31,23 @@
 # app = Flask(__name__)
 # CORS(app)
 #
-# # Detect which kwarg this version of ACE-Step uses for style/genre
+# # Detect which kwargs this version of ACE-Step uses
 # _pipe_params = set(inspect.signature(pipe.__call__).parameters.keys())
 # print(f"ACE-Step __call__ params: {_pipe_params}")
+#
 # _STYLE_KWARG = next(
-#     (k for k in ["tags", "prompt", "style_prompt", "audio_prompt", "genres", "style"] if k in _pipe_params),
-#     None,
+#     (k for k in ["prompt", "tags", "style_prompt", "audio_prompt", "genres", "style"]
+#      if k in _pipe_params), None,
 # )
 # _DURATION_KWARG = "audio_duration" if "audio_duration" in _pipe_params else "duration"
-# _SEED_KWARG = "generator" if "generator" in _pipe_params else "seed"
-# print(f"Using: style={_STYLE_KWARG!r}  duration={_DURATION_KWARG!r}  seed={_SEED_KWARG!r}")
+# # manual_seeds takes a list; seed/generator take a scalar or Generator
+# _SEED_MODE = (
+#     "manual_seeds" if "manual_seeds" in _pipe_params else
+#     "generator"    if "generator"    in _pipe_params else
+#     "seed"         if "seed"         in _pipe_params else
+#     None
+# )
+# print(f"Using: style={_STYLE_KWARG!r}  duration={_DURATION_KWARG!r}  seed_mode={_SEED_MODE!r}")
 #
 # @app.route("/health")
 # def health():
@@ -49,7 +56,7 @@
 # @app.route("/generate", methods=["POST"])
 # def generate():
 #     import torch
-#     body = request.get_json()
+#     body     = request.get_json()
 #     lyrics   = body.get("lyrics", "")
 #     tags     = body.get("tags", "pop")
 #     duration = float(body.get("duration", 30))
@@ -59,10 +66,12 @@
 #         kwargs = {"lyrics": lyrics, _DURATION_KWARG: duration}
 #         if _STYLE_KWARG:
 #             kwargs[_STYLE_KWARG] = tags
-#         if _SEED_KWARG == "generator":
+#         if _SEED_MODE == "manual_seeds":
+#             kwargs["manual_seeds"] = [seed if seed >= 0 else 0]
+#         elif _SEED_MODE == "generator":
 #             if seed >= 0:
 #                 kwargs["generator"] = torch.Generator("cuda").manual_seed(seed)
-#         else:
+#         elif _SEED_MODE == "seed":
 #             kwargs["seed"] = seed if seed >= 0 else None
 #
 #         result = pipe(**kwargs)
@@ -73,13 +82,12 @@
 #         buf = io.BytesIO()
 #         sf.write(buf, audio_np.T if audio_np.ndim == 2 else audio_np, sr, format="WAV")
 #         audio_b64 = base64.b64encode(buf.getvalue()).decode()
-#
 #         return jsonify({"audio_b64": audio_b64, "seed": used_seed})
 #     except Exception as e:
 #         return jsonify({"error": str(e)}), 500
 #
-# # Get your authtoken from ngrok.com/your-settings (or from your .env.local)
-# ngrok.set_auth_token("PASTE_YOUR_NGROK_TOKEN_HERE")
+# # Get your authtoken from ngrok.com/your-settings
+# ngrok.set_auth_token("YOUR_NGROK_TOKEN_HERE")  # from ngrok.com/your-settings
 # tunnel = ngrok.connect(5000, bind_tls=True)
 # public_url = tunnel.public_url
 #
@@ -88,8 +96,6 @@
 # print(f"  Paste this into your Vercel env vars and redeploy")
 # print(f"{'='*60}\n")
 #
-# # Run Flask in a background thread so this cell finishes
-# # and the URL stays visible above. Stop the runtime to kill the server.
 # t = threading.Thread(target=lambda: app.run(port=5000, use_reloader=False))
 # t.daemon = True
 # t.start()
