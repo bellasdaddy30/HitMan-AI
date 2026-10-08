@@ -1,9 +1,9 @@
 import { NextRequest } from 'next/server';
 
-export const maxDuration = 120;
+export const maxDuration = 300;
 
 export async function POST(req: NextRequest) {
-  const { lyrics, genre, mood, bpm, key, duration, seed } = await req.json();
+  const { lyrics, genre, mood, bpm, key, duration, seed, description } = await req.json();
 
   if (!lyrics?.trim()) {
     return Response.json({ error: 'Lyrics are required.' }, { status: 400 });
@@ -14,7 +14,8 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: 'Music generation is offline. Start the Colab notebook and set MUSIC_API_URL.' }, { status: 503 });
   }
 
-  const tags = `${genre.toLowerCase()}, ${mood.toLowerCase()}, ${bpm} bpm, key of ${key}`;
+  const descPart = description?.trim() ? `, ${description.trim()}` : '';
+  const tags = `${genre.toLowerCase()}, ${mood.toLowerCase()}, ${bpm} bpm, key of ${key}${descPart}`;
 
   try {
     const res = await fetch(`${apiUrl}/generate`, {
@@ -24,7 +25,7 @@ export async function POST(req: NextRequest) {
         'ngrok-skip-browser-warning': 'true',
       },
       body: JSON.stringify({ lyrics, tags, duration, seed }),
-      signal: AbortSignal.timeout(110_000),
+      signal: AbortSignal.timeout(290_000),
     });
 
     if (!res.ok) {
