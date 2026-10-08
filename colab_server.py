@@ -22,7 +22,7 @@
 # print("Model ready.")
 
 # ── CELL 3: Start server + ngrok ─────────────────────────────────────────────
-# import base64, io, threading
+# import base64, inspect, io, threading
 # from flask import Flask, request, jsonify
 # from flask_cors import CORS
 # from pyngrok import ngrok
@@ -31,12 +31,24 @@
 # app = Flask(__name__)
 # CORS(app)
 #
+# # Detect which kwarg this version of ACE-Step uses for style/genre
+# _pipe_params = set(inspect.signature(pipe.__call__).parameters.keys())
+# print(f"ACE-Step __call__ params: {_pipe_params}")
+# _STYLE_KWARG = next(
+#     (k for k in ["tags", "prompt", "style_prompt", "audio_prompt", "genres", "style"] if k in _pipe_params),
+#     None,
+# )
+# _DURATION_KWARG = "audio_duration" if "audio_duration" in _pipe_params else "duration"
+# _SEED_KWARG = "generator" if "generator" in _pipe_params else "seed"
+# print(f"Using: style={_STYLE_KWARG!r}  duration={_DURATION_KWARG!r}  seed={_SEED_KWARG!r}")
+#
 # @app.route("/health")
 # def health():
 #     return jsonify({"ok": True})
 #
 # @app.route("/generate", methods=["POST"])
 # def generate():
+#     import torch
 #     body = request.get_json()
 #     lyrics   = body.get("lyrics", "")
 #     tags     = body.get("tags", "pop")
@@ -44,21 +56,16 @@
 #     seed     = int(body.get("seed", -1))
 #
 #     try:
-#         # ACE-Step renamed 'tags' to 'prompt' in newer releases
-#         try:
-#             result = pipe(
-#                 lyrics=lyrics,
-#                 prompt=tags,
-#                 duration=duration,
-#                 seed=seed if seed >= 0 else None,
-#             )
-#         except TypeError:
-#             result = pipe(
-#                 lyrics=lyrics,
-#                 tags=tags,
-#                 duration=duration,
-#                 seed=seed if seed >= 0 else None,
-#             )
+#         kwargs = {"lyrics": lyrics, _DURATION_KWARG: duration}
+#         if _STYLE_KWARG:
+#             kwargs[_STYLE_KWARG] = tags
+#         if _SEED_KWARG == "generator":
+#             if seed >= 0:
+#                 kwargs["generator"] = torch.Generator("cuda").manual_seed(seed)
+#         else:
+#             kwargs["seed"] = seed if seed >= 0 else None
+#
+#         result = pipe(**kwargs)
 #         audio_np = result.audios[0]
 #         sr = result.sample_rate
 #         used_seed = result.seeds[0] if hasattr(result, "seeds") else seed
