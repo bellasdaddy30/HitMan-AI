@@ -1,33 +1,26 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { supabase } from '@/lib/supabase';
+import type { Session } from '@supabase/supabase-js';
 
 const GENRES = [
-  // Hip Hop & Rap
   'Hip Hop', 'Trap', 'Drill', 'UK Drill', 'Boom Bap', 'Phonk', 'Memphis Rap', 'Grime', 'Cloud Rap',
-  // R&B & Soul
   'R&B', 'Neo Soul', 'Soul', 'Gospel',
-  // Pop
   'Pop', 'Indie Pop', 'Alternative',
-  // Rock
   'Rock', 'Indie Rock', 'Metal', 'Punk',
-  // Country & Folk
   'Country', 'Folk',
-  // Electronic
   'EDM', 'House', 'Techno', 'Ambient', 'Lo-Fi',
-  // Jazz & Blues
   'Jazz', 'Blues',
-  // Global
   'Afrobeats', 'Reggaeton', 'Latin Trap', 'Dancehall', 'Reggae',
 ];
-const KEYS   = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-const MOODS  = ['Dark', 'Uplifting', 'Melancholic', 'Aggressive', 'Romantic', 'Chill', 'Hype'];
+const KEYS  = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+const MOODS = ['Dark', 'Uplifting', 'Melancholic', 'Aggressive', 'Romantic', 'Chill', 'Hype'];
 
-const FREE_CREDITS  = 3;
-const LS_HISTORY    = 'hitman_history';
-const LS_CREDITS    = 'hitman_credits';
-const LS_EMAIL      = 'hitman_email';
-const ADMIN_SECRET  = 'hitmanboss';
+const FREE_CREDITS = 3;
+const LS_HISTORY   = 'hitman_history';
+const LS_CREDITS   = 'hitman_credits';
+const ADMIN_SECRET = 'hitmanboss';
 
 function fmtDuration(s: number) {
   if (s < 60) return `${s}s`;
@@ -35,8 +28,17 @@ function fmtDuration(s: number) {
 }
 
 type Version = {
-  id: number; url: string; seed: number; genre: string;
-  bpm: number; key: string; lyrics: string; createdAt: string;
+  id: number;
+  db_id?: string;
+  url: string;
+  seed: number;
+  genre: string;
+  bpm: number;
+  key: string;
+  lyrics: string;
+  description?: string;
+  audio_path?: string;
+  createdAt: string;
 };
 
 function loadHistory(): Version[] {
@@ -45,36 +47,29 @@ function loadHistory(): Version[] {
 function saveHistory(v: Version[]) {
   try { localStorage.setItem(LS_HISTORY, JSON.stringify(v.slice(0, 50))); } catch {}
 }
-function loadCredits(): number {
+function loadLocalCredits(): number {
   try { const s = localStorage.getItem(LS_CREDITS); return s === null ? FREE_CREDITS : Math.max(0, Number(s)); }
   catch { return FREE_CREDITS; }
 }
-function saveCredits(n: number) { try { localStorage.setItem(LS_CREDITS, String(n)); } catch {} }
-function loadEmail(): string { try { return localStorage.getItem(LS_EMAIL) || ''; } catch { return ''; } }
-function saveEmail(e: string) { try { localStorage.setItem(LS_EMAIL, e); } catch {} }
+function saveLocalCredits(n: number) { try { localStorage.setItem(LS_CREDITS, String(n)); } catch {} }
 
-// ── Background shell — hitman.jpg blurred + dark overlay ─────────────────────
+// ── Background shell ──────────────────────────────────────────────────────────
 function PageShell({ children, tint = 'rgba(9,9,14,0.82)' }: { children: React.ReactNode; tint?: string }) {
   return (
     <div style={{ position: 'relative', minHeight: '100dvh', overflowX: 'hidden' }}>
-      {/* background image */}
       <img src="/hitman.jpg" aria-hidden="true" alt=""
         style={{ position: 'fixed', inset: 0, width: '100%', height: '100%',
           objectFit: 'cover', objectPosition: 'center top', zIndex: 0,
           filter: 'blur(6px) brightness(0.38)', transform: 'scale(1.06)' }} />
-      {/* tinted overlay */}
       <div style={{ position: 'fixed', inset: 0, background: tint, zIndex: 1 }} />
-      {/* red vignette bottom */}
       <div style={{ position: 'fixed', bottom: 0, left: '50%', transform: 'translateX(-50%)',
         width: '80%', height: '35%', zIndex: 1, pointerEvents: 'none',
         background: 'radial-gradient(ellipse at bottom, rgba(230,57,70,0.12) 0%, transparent 70%)' }} />
-      {/* content */}
       <div style={{ position: 'relative', zIndex: 2 }}>{children}</div>
     </div>
   );
 }
 
-// ── Glass card wrapper ────────────────────────────────────────────────────────
 const glass: React.CSSProperties = {
   background: 'rgba(17,17,24,0.72)',
   backdropFilter: 'blur(14px)',
@@ -83,7 +78,7 @@ const glass: React.CSSProperties = {
   borderRadius: '12px',
 };
 
-// ── Animated waveform ─────────────────────────────────────────────────────────
+// ── Waveform progress ─────────────────────────────────────────────────────────
 function WaveProgress({ elapsed, duration }: { elapsed: number; duration: number }) {
   const pct = Math.min(elapsed / (duration + 30), 0.95);
   return (
@@ -110,19 +105,96 @@ function WaveProgress({ elapsed, duration }: { elapsed: number; duration: number
   );
 }
 
+// ── Auth modal ────────────────────────────────────────────────────────────────
+function AuthModal({ onClose, onAuth }: { onClose: () => void; onAuth: (session: Session) => void }) {
+  const [mode,     setMode]     = useState<'signin' | 'signup'>('signin');
+  const [email,    setEmail]    = useState('');
+  const [password, setPassword] = useState('');
+  const [loading,  setLoading]  = useState(false);
+  const [error,    setError]    = useState('');
+  const [success,  setSuccess]  = useState('');
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(''); setSuccess(''); setLoading(true);
+    try {
+      if (mode === 'signup') {
+        const { data, error: err } = await supabase.auth.signUp({ email, password });
+        if (err) { setError(err.message); return; }
+        if (data.session) { onAuth(data.session); onClose(); return; }
+        setSuccess('Check your email to confirm your account, then sign in.');
+      } else {
+        const { data, error: err } = await supabase.auth.signInWithPassword({ email, password });
+        if (err) { setError(err.message); return; }
+        if (data.session) { onAuth(data.session); onClose(); }
+      }
+    } finally { setLoading(false); }
+  }
+
+  const inputStyle: React.CSSProperties = {
+    background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)',
+    borderRadius: '8px', padding: '0.7rem 1rem', color: 'var(--text)',
+    fontSize: '0.95rem', outline: 'none', width: '100%', boxSizing: 'border-box',
+  };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(9,9,14,0.88)',
+      backdropFilter: 'blur(8px)', zIndex: 1000,
+      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem' }}
+      onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{
+        ...glass, padding: '2rem', maxWidth: '400px', width: '100%',
+        display: 'flex', flexDirection: 'column', gap: '1.25rem',
+        border: '1px solid rgba(230,57,70,0.25)',
+        boxShadow: '0 0 60px rgba(230,57,70,0.12)',
+        animation: 'fadeUp 0.25s ease both',
+      }}>
+        {/* Tabs */}
+        <div style={{ display: 'flex', gap: '0', borderRadius: '8px', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.08)' }}>
+          {(['signin', 'signup'] as const).map(m => (
+            <button key={m} onClick={() => { setMode(m); setError(''); setSuccess(''); }} style={{
+              flex: 1, padding: '0.55rem', border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: '0.88rem',
+              background: mode === m ? 'var(--accent)' : 'transparent',
+              color: mode === m ? '#fff' : 'var(--muted)',
+              transition: 'all 0.15s',
+            }}>
+              {m === 'signin' ? 'Sign In' : 'Create Account'}
+            </button>
+          ))}
+        </div>
+
+        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+          <input type="email" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} required style={inputStyle} />
+          <input type="password" placeholder="Password" value={password} onChange={e => setPassword(e.target.value)} required style={inputStyle} />
+          {error   && <p style={{ color: 'var(--accent)', fontSize: '0.85rem', margin: 0 }}>{error}</p>}
+          {success && <p style={{ color: '#4caf50',       fontSize: '0.85rem', margin: 0 }}>{success}</p>}
+          <button type="submit" disabled={loading} style={{
+            background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: '8px',
+            padding: '0.8rem', fontWeight: 900, fontSize: '0.95rem', cursor: loading ? 'not-allowed' : 'pointer',
+            opacity: loading ? 0.7 : 1, letterSpacing: '0.04em',
+          }}>
+            {loading ? '…' : mode === 'signin' ? 'Sign In' : 'Create Account'}
+          </button>
+        </form>
+        <button onClick={onClose} style={{ background: 'none', border: 'none', color: 'var(--muted)', fontSize: '0.82rem', cursor: 'pointer' }}>
+          Continue as guest
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── Paywall modal ─────────────────────────────────────────────────────────────
 function PaywallModal({ onClose, onUnlocked }: { onClose: () => void; onUnlocked: (n: number) => void }) {
-  const [email, setEmail] = useState(loadEmail());
+  const [email,  setEmail]  = useState('');
   const [buying, setBuying] = useState(false);
 
   async function handleBuy(credits: number, priceId: string) {
     if (!email.trim()) { alert('Enter your email first.'); return; }
-    saveEmail(email.trim());
     setBuying(true);
     try {
       const res = await fetch('/api/checkout', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: email.trim(), credits, priceId }),
       });
       const { url } = await res.json();
@@ -155,15 +227,14 @@ function PaywallModal({ onClose, onUnlocked }: { onClose: () => void; onUnlocked
           onChange={e => setEmail(e.target.value)}
           style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)',
             borderRadius: '8px', padding: '0.7rem 1rem', color: 'var(--text)',
-            fontSize: '0.95rem', outline: 'none', width: '100%' }} />
+            fontSize: '0.95rem', outline: 'none', width: '100%', boxSizing: 'border-box' }} />
         <div style={{ display: 'flex', gap: '0.75rem' }}>
           <PriceCard label="Starter" credits={20} price="$5" perSong="$0.25/song"
             onClick={() => handleBuy(20, process.env.NEXT_PUBLIC_STRIPE_PRICE_20 || '')} disabled={buying} />
           <PriceCard label="Pro" credits={60} price="$12" perSong="$0.20/song" highlight
             onClick={() => handleBuy(60, process.env.NEXT_PUBLIC_STRIPE_PRICE_60 || '')} disabled={buying} />
         </div>
-        <button onClick={onClose}
-          style={{ background: 'none', border: 'none', color: 'var(--muted)', fontSize: '0.85rem', cursor: 'pointer' }}>
+        <button onClick={onClose} style={{ background: 'none', border: 'none', color: 'var(--muted)', fontSize: '0.85rem', cursor: 'pointer' }}>
           Maybe later
         </button>
       </div>
@@ -202,7 +273,6 @@ export default function Studio() {
   const [bpm,         setBpm]         = useState(90);
   const [key,         setKey]         = useState('C');
   const [duration,    setDuration]    = useState(30);
-  const [isAdmin,     setIsAdmin]     = useState(false);
 
   const [generating,       setGenerating]       = useState(false);
   const [generatingLyrics, setGeneratingLyrics] = useState(false);
@@ -212,16 +282,69 @@ export default function Studio() {
   const [playing,          setPlaying]          = useState<number | null>(null);
   const [credits,          setCredits]          = useState(FREE_CREDITS);
   const [showPaywall,      setShowPaywall]       = useState(false);
+  const [showAuth,         setShowAuth]          = useState(false);
   const [offline,          setOffline]          = useState(false);
+  const [session,          setSession]          = useState<Session | null>(null);
+  const [isAdmin,          setIsAdmin]          = useState(false);
+  const [loadingHistory,   setLoadingHistory]   = useState(false);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const nextId   = useRef(1);
 
+  // Load user's songs + credits from Supabase
+  const loadUserData = useCallback(async (userId: string) => {
+    setLoadingHistory(true);
+    try {
+      // Credits
+      const { data: cred } = await supabase
+        .from('credits').select('amount').eq('user_id', userId).single();
+      if (cred) setCredits(cred.amount);
+
+      // Songs (metadata only — audio loaded via signed URL)
+      const { data: songs } = await supabase
+        .from('songs')
+        .select('id, genre, mood, bpm, key, duration, lyrics, description, audio_path, seed, created_at')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(50);
+
+      if (songs && songs.length > 0) {
+        const maxId = songs.length + 1;
+        nextId.current = maxId;
+
+        // Get signed URLs for audio in parallel
+        const versionsWithUrls: Version[] = await Promise.all(songs.map(async (s, i) => {
+          let url = '';
+          if (s.audio_path) {
+            const { data: signed } = await supabase.storage
+              .from('hitman-audio')
+              .createSignedUrl(s.audio_path, 3600);
+            url = signed?.signedUrl || '';
+          }
+          return {
+            id: maxId - i,
+            db_id: s.id,
+            url,
+            seed: s.seed ?? 0,
+            genre: s.genre,
+            bpm: s.bpm,
+            key: s.key,
+            lyrics: s.lyrics,
+            description: s.description ?? '',
+            audio_path: s.audio_path ?? '',
+            createdAt: s.created_at,
+          };
+        }));
+        setVersions(versionsWithUrls);
+      }
+    } finally {
+      setLoadingHistory(false);
+    }
+  }, []);
+
   useEffect(() => {
-    const hist = loadHistory();
-    if (hist.length) { nextId.current = Math.max(...hist.map(v => v.id)) + 1; setVersions(hist); }
-    setCredits(loadCredits());
+    // Check admin
     const params = new URLSearchParams(window.location.search);
     if (params.get('admin') === ADMIN_SECRET) {
       setIsAdmin(true);
@@ -229,7 +352,29 @@ export default function Studio() {
     } else {
       try { if (sessionStorage.getItem('hitman_admin') === '1') setIsAdmin(true); } catch {}
     }
-  }, []);
+
+    // Restore local history for guests
+    const hist = loadHistory();
+    if (hist.length) {
+      nextId.current = Math.max(...hist.map(v => v.id)) + 1;
+      setVersions(hist);
+    }
+    setCredits(loadLocalCredits());
+
+    // Check Supabase session
+    supabase.auth.getSession().then(({ data: { session: s } }) => {
+      if (s) {
+        setSession(s);
+        loadUserData(s.user.id);
+      }
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => {
+      setSession(s);
+      if (s) loadUserData(s.user.id);
+    });
+    return () => subscription.unsubscribe();
+  }, [loadUserData]);
 
   function startTimer() {
     setElapsed(0);
@@ -237,6 +382,22 @@ export default function Studio() {
   }
   function stopTimer() {
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+  }
+
+  async function uploadAudio(userId: string, songId: string, b64: string): Promise<string | null> {
+    try {
+      const binary = atob(b64);
+      const bytes  = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const blob = new Blob([bytes], { type: 'audio/wav' });
+      const path = `${userId}/${songId}.wav`;
+      const { error } = await supabase.storage.from('hitman-audio').upload(path, blob, { contentType: 'audio/wav', upsert: true });
+      if (error) { console.error('[upload]', error.message); return null; }
+      return path;
+    } catch (e) {
+      console.error('[upload]', e);
+      return null;
+    }
   }
 
   async function handleGenerate() {
@@ -254,10 +415,47 @@ export default function Studio() {
       if (!res.ok) { setError(data.error || 'Generation failed.'); return; }
 
       const audioUrl = data.audio_b64 ? `data:audio/wav;base64,${data.audio_b64}` : data.url;
-      const version: Version = { id: nextId.current++, url: audioUrl, seed: data.seed ?? seed, genre, bpm, key, lyrics, createdAt: new Date().toISOString() };
+      const songDbId = crypto.randomUUID();
+      let   audioPath: string | null = null;
+
+      // Save to Supabase if signed in
+      if (session) {
+        if (data.audio_b64) {
+          audioPath = await uploadAudio(session.user.id, songDbId, data.audio_b64);
+        }
+        await supabase.from('songs').insert({
+          id: songDbId, user_id: session.user.id,
+          genre, mood, bpm, key, duration, lyrics, description,
+          audio_path: audioPath, seed: data.seed ?? seed,
+        });
+        // Decrement credits in DB
+        if (!isAdmin) {
+          await supabase.from('credits')
+            .update({ amount: credits - 1, updated_at: new Date().toISOString() })
+            .eq('user_id', session.user.id);
+        }
+      }
+
+      const version: Version = {
+        id: nextId.current++,
+        db_id: songDbId,
+        url: audioUrl,
+        seed: data.seed ?? seed,
+        genre, bpm, key, lyrics,
+        description,
+        audio_path: audioPath ?? '',
+        createdAt: new Date().toISOString(),
+      };
+
       const newVersions = [version, ...versions];
-      setVersions(newVersions); saveHistory(newVersions);
-      if (!isAdmin) { const newCredits = credits - 1; setCredits(newCredits); saveCredits(newCredits); }
+      setVersions(newVersions);
+
+      if (!session) saveHistory(newVersions);
+      if (!isAdmin) {
+        const newCredits = credits - 1;
+        setCredits(newCredits);
+        if (!session) saveLocalCredits(newCredits);
+      }
       playVersion(version);
     } catch { setError('Something went wrong. Try again.'); }
     finally { setGenerating(false); stopTimer(); }
@@ -266,7 +464,10 @@ export default function Studio() {
   async function handleGenerateLyrics() {
     setGeneratingLyrics(true); setError('');
     try {
-      const res  = await fetch('/api/lyrics', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ genre, mood, prompt: lyrics, description }) });
+      const res  = await fetch('/api/lyrics', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ genre, mood, prompt: lyrics, description }),
+      });
       const data = await res.json();
       if (!res.ok) { setError(data.error || 'Lyrics generation failed.'); return; }
       setLyrics(data.lyrics);
@@ -274,8 +475,17 @@ export default function Studio() {
     finally { setGeneratingLyrics(false); }
   }
 
+  async function handleSignOut() {
+    await supabase.auth.signOut();
+    setSession(null);
+    const hist = loadHistory();
+    setVersions(hist);
+    setCredits(loadLocalCredits());
+  }
+
   function playVersion(v: Version) {
     if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = ''; }
+    if (!v.url) return;
     const audio = new Audio(v.url); audioRef.current = audio;
     audio.play().catch(() => {}); setPlaying(v.id);
     audio.onended = () => setPlaying(null);
@@ -284,10 +494,18 @@ export default function Studio() {
     if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = ''; }
     setPlaying(null);
   }
-  function removeVersion(id: number) {
-    const updated = versions.filter(v => v.id !== id);
-    setVersions(updated); saveHistory(updated);
-    if (playing === id) stopAudio();
+
+  async function removeVersion(v: Version) {
+    const updated = versions.filter(x => x.id !== v.id);
+    setVersions(updated);
+    if (!session) saveHistory(updated);
+    if (playing === v.id) stopAudio();
+    if (v.db_id && session) {
+      if (v.audio_path) {
+        await supabase.storage.from('hitman-audio').remove([v.audio_path]);
+      }
+      await supabase.from('songs').delete().eq('id', v.db_id);
+    }
   }
 
   if (offline) {
@@ -316,40 +534,62 @@ export default function Studio() {
     );
   }
 
+  const userEmail = session?.user?.email;
+
   return (
     <PageShell>
       {showPaywall && (
         <PaywallModal
           onClose={() => setShowPaywall(false)}
-          onUnlocked={(n) => { const c = credits + n; setCredits(c); saveCredits(c); setShowPaywall(false); }}
+          onUnlocked={(n) => { const c = credits + n; setCredits(c); setShowPaywall(false); }}
+        />
+      )}
+      {showAuth && (
+        <AuthModal
+          onClose={() => setShowAuth(false)}
+          onAuth={(s) => { setSession(s); loadUserData(s.user.id); }}
         />
       )}
 
       <div style={{ maxWidth: '760px', margin: '0 auto', padding: '1.5rem 1rem 4rem', animation: 'fadeUp 0.5s ease 0.1s both' }}>
 
         {/* Header */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '2rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '2rem', gap: '0.75rem', flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
             <a href="/" style={{ color: 'var(--muted)', fontSize: '0.9rem' }}>← HitMan AI</a>
             <span style={{ color: 'var(--border)' }}>|</span>
             <span style={{ fontWeight: 700, fontSize: '1rem' }}>Studio</span>
           </div>
-          {isAdmin ? (
-            <span style={{ background: 'rgba(230,57,70,0.2)', border: '1px solid rgba(230,57,70,0.6)', borderRadius: '9999px', padding: '0.3rem 0.9rem', color: 'var(--accent)', fontSize: '0.8rem', fontWeight: 700, letterSpacing: '0.05em' }}>
-              🔑 ADMIN
-            </span>
-          ) : (
-            <button onClick={() => credits <= 0 ? setShowPaywall(true) : undefined} style={{
-              background: credits <= 2 ? 'rgba(230,57,70,0.15)' : 'rgba(255,255,255,0.06)',
-              border: `1px solid ${credits <= 2 ? 'rgba(230,57,70,0.6)' : 'rgba(255,255,255,0.1)'}`,
-              borderRadius: '9999px', padding: '0.3rem 0.9rem',
-              color: credits <= 2 ? 'var(--accent)' : 'var(--muted)',
-              fontSize: '0.8rem', fontWeight: 700, cursor: credits <= 0 ? 'pointer' : 'default',
-              animation: credits <= 1 ? 'borderGlow 1.8s ease-in-out infinite' : 'none',
-            }}>
-              {credits <= 0 ? '⚡ Buy credits' : `⚡ ${credits} credit${credits === 1 ? '' : 's'} left`}
-            </button>
-          )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+            {isAdmin ? (
+              <span style={{ background: 'rgba(230,57,70,0.2)', border: '1px solid rgba(230,57,70,0.6)', borderRadius: '9999px', padding: '0.3rem 0.9rem', color: 'var(--accent)', fontSize: '0.8rem', fontWeight: 700, letterSpacing: '0.05em' }}>
+                🔑 ADMIN
+              </span>
+            ) : (
+              <button onClick={() => credits <= 0 ? setShowPaywall(true) : undefined} style={{
+                background: credits <= 2 ? 'rgba(230,57,70,0.15)' : 'rgba(255,255,255,0.06)',
+                border: `1px solid ${credits <= 2 ? 'rgba(230,57,70,0.6)' : 'rgba(255,255,255,0.1)'}`,
+                borderRadius: '9999px', padding: '0.3rem 0.9rem',
+                color: credits <= 2 ? 'var(--accent)' : 'var(--muted)',
+                fontSize: '0.8rem', fontWeight: 700, cursor: credits <= 0 ? 'pointer' : 'default',
+                animation: credits <= 1 ? 'borderGlow 1.8s ease-in-out infinite' : 'none',
+              }}>
+                {credits <= 0 ? '⚡ Buy credits' : `⚡ ${credits} credit${credits === 1 ? '' : 's'} left`}
+              </button>
+            )}
+            {session ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <span style={{ fontSize: '0.78rem', color: 'var(--muted)', maxWidth: '130px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{userEmail}</span>
+                <button onClick={handleSignOut} style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '0.28rem 0.7rem', color: 'var(--muted)', fontSize: '0.78rem', cursor: 'pointer', fontWeight: 600 }}>
+                  Sign out
+                </button>
+              </div>
+            ) : (
+              <button onClick={() => setShowAuth(true)} style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: '9999px', padding: '0.3rem 0.9rem', color: 'var(--text)', fontSize: '0.8rem', fontWeight: 700, cursor: 'pointer' }}>
+                Sign In
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Song Description */}
@@ -392,7 +632,7 @@ export default function Studio() {
               border: '1px solid rgba(255,255,255,0.08)', borderRadius: '10px',
               padding: '1rem', color: 'var(--text)', fontSize: '0.95rem',
               lineHeight: 1.6, resize: 'vertical', outline: 'none', fontFamily: 'inherit',
-              transition: 'border-color 0.2s',
+              transition: 'border-color 0.2s', boxSizing: 'border-box',
             }} />
         </section>
 
@@ -420,7 +660,7 @@ export default function Studio() {
 
         {error && <p style={{ color: 'var(--accent)', marginBottom: '1rem', fontSize: '0.9rem' }}>{error}</p>}
 
-        {/* Generate / progress */}
+        {/* Generate */}
         {generating ? (
           <div style={{ ...glass, padding: '1.5rem', marginBottom: '2rem' }}>
             <WaveProgress elapsed={elapsed} duration={duration} />
@@ -431,26 +671,30 @@ export default function Studio() {
             color: '#fff', fontSize: '1.1rem', fontWeight: 900, cursor: 'pointer',
             letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: '2rem',
             backgroundSize: '200% auto',
-            background: credits <= 0
+            background: !isAdmin && credits <= 0
               ? 'var(--accent)'
               : 'linear-gradient(90deg, #e63946 0%, #ff6b6b 40%, #fff 50%, #ff6b6b 60%, #e63946 100%)',
-            animation: credits > 0 ? 'shimmer 2.8s linear infinite, glowPulse 2.5s ease-in-out infinite' : 'glowPulse 2.5s ease-in-out infinite',
+            animation: isAdmin || credits > 0 ? 'shimmer 2.8s linear infinite, glowPulse 2.5s ease-in-out infinite' : 'glowPulse 2.5s ease-in-out infinite',
           }}>
             {!isAdmin && credits <= 0 ? '⚡ Buy Credits to Generate' : '🎯 Generate Song'}
           </button>
         )}
 
         {/* Version history */}
-        {versions.length > 0 && (
+        {loadingHistory ? (
+          <p style={{ color: 'var(--muted)', fontSize: '0.85rem', textAlign: 'center' }}>Loading your songs…</p>
+        ) : versions.length > 0 && (
           <section>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
               <h2 style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                 Your Songs ({versions.length})
               </h2>
-              <button onClick={() => { setVersions([]); saveHistory([]); stopAudio(); }}
-                style={{ background: 'none', border: 'none', color: 'var(--muted)', fontSize: '0.78rem', cursor: 'pointer' }}>
-                Clear all
-              </button>
+              {!session && (
+                <button onClick={() => { setVersions([]); saveHistory([]); stopAudio(); }}
+                  style={{ background: 'none', border: 'none', color: 'var(--muted)', fontSize: '0.78rem', cursor: 'pointer' }}>
+                  Clear all
+                </button>
+              )}
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
               {versions.map(v => (
@@ -467,13 +711,20 @@ export default function Studio() {
                     <div style={{ fontSize: '0.75rem', color: 'var(--muted)', marginTop: '0.2rem' }}>
                       Seed {v.seed} · {new Date(v.createdAt).toLocaleString()}
                     </div>
+                    {v.description && (
+                      <div style={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.3)', marginTop: '0.15rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '320px' }}>{v.description}</div>
+                    )}
                   </div>
                   <div style={{ display: 'flex', gap: '0.5rem', flexShrink: 0 }}>
-                    {playing === v.id
-                      ? <button onClick={stopAudio} style={btnStyle('rgba(255,255,255,0.1)')}>⏹</button>
-                      : <button onClick={() => playVersion(v)} style={btnStyle('var(--accent)')}>▶</button>}
-                    <a href={v.url} download={`hitman-${v.genre.toLowerCase().replace(' ', '-')}-${v.seed}.wav`} style={btnStyle('rgba(255,255,255,0.06)')}>↓</a>
-                    <button onClick={() => removeVersion(v.id)} style={btnStyle('rgba(255,255,255,0.06)')}>✕</button>
+                    {v.url ? (
+                      playing === v.id
+                        ? <button onClick={stopAudio} style={btnStyle('rgba(255,255,255,0.1)')}>⏹</button>
+                        : <button onClick={() => playVersion(v)} style={btnStyle('var(--accent)')}>▶</button>
+                    ) : (
+                      <span style={{ ...btnStyle('rgba(255,255,255,0.04)'), opacity: 0.4, cursor: 'default', display: 'inline-flex', alignItems: 'center' }}>▶</span>
+                    )}
+                    {v.url && <a href={v.url} download={`hitman-${v.genre.toLowerCase().replace(/ /g, '-')}-${v.seed}.wav`} style={btnStyle('rgba(255,255,255,0.06)')}>↓</a>}
+                    <button onClick={() => removeVersion(v)} style={btnStyle('rgba(255,255,255,0.06)')}>✕</button>
                   </div>
                 </div>
               ))}
@@ -501,5 +752,5 @@ const selectStyle: React.CSSProperties = {
 };
 
 function btnStyle(bg: string): React.CSSProperties {
-  return { background: bg, border: 'none', color: '#fff', padding: '0.4rem 0.8rem', borderRadius: '6px', fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer' };
+  return { background: bg, border: 'none', color: '#fff', padding: '0.4rem 0.8rem', borderRadius: '6px', fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer', textDecoration: 'none', display: 'inline-block' };
 }
